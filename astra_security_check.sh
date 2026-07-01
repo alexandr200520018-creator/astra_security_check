@@ -1,33 +1,152 @@
 #!/bin/bash
 
+# ============================================================================
+# СКРИПТ АНАЛИЗА ЗАЩИЩЕННОСТИ ASTRA LINUX SE 1.7/1.8
+# Версия: 2.3
+# Описание: Сбор параметров безопасности и сравнение с эталонными значениями
+# ============================================================================
+
 # Файл для сохранения результатов
 OUTPUT_FILE="security_report_full_$(date +%Y%m%d_%H%M%S).txt"
 
 # Цветовое оформление для экрана
 HEADER_COLOR="\033[1;34m"
-NC="\033[0m"
+GREEN="\033[0;32m"
+RED="\033[0;31m"
+YELLOW="\033[0;33m"
+NC="\033[0m" # No Color
 
-# Функция для вывода строки таблицы (без цветов, для файла)
-print_row_to_file() {
-    local name="$1"
-    local file="$2"
-    local param="$3"
-    local value="$4"
+# ============================================================================
+# БАЗА ЭТАЛОННЫХ ЗНАЧЕНИЙ
+# ============================================================================
 
-    echo "$name$file$param$value" >> "$OUTPUT_FILE"
+declare -A EXPECTED_VALUES=(
+    # Парольная политика (Раздел 1)
+    ["PASS_MAX_DAYS"]="90"
+    ["PASS_MIN_DAYS"]="7"
+    ["PASS_WARN_AGE"]="14"
+    ["deny"]="8"
+    ["per_user"]="включен"
+    ["dcredit"]="1"
+    ["difok"]="3"
+    ["lcredit"]="1"
+    ["minlen"]="12"
+    ["ocredit"]="1"
+    ["ucredit"]="1"
+    ["reject_username"]="да"
+    ["gecoscheck"]="да"
+    ["enforce_for_root_complex"]="да"
+    ["enforce_for_root_history"]="да"
+    ["remember"]="5"
+    ["inactive_shadow"]="90"
+    ["INACTIVE"]="90"
+    
+    # Инструменты командной строки Astra (Раздел 2)
+    ["astra-sudo-control"]="ВКЛЮЧЕНО"
+    ["astra-shutdown-lock"]="ВКЛЮЧЕНО"
+    ["astra-mount-lock"]="ВКЛЮЧЕНО"
+    ["astra-format-lock"]="ВКЛЮЧЕНО"
+    ["astra-mic-control"]="АКТИВНО"
+    ["astra-strictmode-control"]="ВЫКЛЮЧЕНО"
+    ["astra-ufw-control"]="ВЫКЛЮЧЕНО"
+    ["astra-nochmodx-lock"]="ВКЛЮЧЕНО"
+    ["astra-ptrace-lock"]="ВЫКЛЮЧЕНО"
+    ["astra-ulimits-control"]="ВЫКЛЮЧЕНО"
+    ["astra-lkrg-control"]="ВЫКЛЮЧЕНО"
+    ["astra-rootloginssh-control"]="ВКЛЮЧЕНО"
+    ["astra-docker-isolation"]="ВКЛЮЧЕНО"
+    ["astra-ilev1-control"]="ВКЛЮЧЕНО"
+    ["astra-audit-control"]="ENABLE"
+    ["astra-audit-network-control"]="ENABLE"
+    ["astra-modban-lock"]="ENABLE"
+    ["astra-noautonet-control"]="ВКЛЮЧЕНО"
+    ["astra-hardened-control"]="ВЫКЛЮЧЕНО"
+    ["astra-console-lock"]="ВКЛЮЧЕНО"
+    ["astra-interpreters-lock"]="ВКЛЮЧЕНО"
+    ["astra-bash-lock"]="ВЫКЛЮЧЕНО"
+    ["astra-digsig-control"]="ВЫКЛЮЧЕНО"
+    ["astra-secdel-control"]="ВКЛЮЧЕНО"
+    ["astra-swapwiper-control"]="ВКЛЮЧЕНО"
+    
+    # Параметры ядра (Раздел 3)
+    ["net.ipv4.ip_forward"]="выключено"
+    ["net.ipv4.conf.all.accept_redirects"]="выключено"
+    ["net.ipv4.conf.all.secure_redirects"]="выключено"
+    ["net.ipv4.conf.all.send_redirects"]="выключено"
+    ["fs.protected_hardlinks"]="включено"
+    ["fs.protected_symlinks"]="включено"
+    ["fs.suid_dumpable"]="включено"
+    ["kernel.randomize_va_space"]="включено"
+    ["net.ipv4.conf.default.rp_filter"]="включено"
+    ["net.ipv4.conf.all.rp_filter"]="включено"
+    ["kernel.dmesg_restrict"]="включено"
+    ["kernel.yama.ptrace_scope"]="включено"
+    ["kernel.perf_event_paranoid"]="включено"
+    ["vm.unprivileged_userfaultfd"]="включено"
+    
+    # Конфигурация SSH (Раздел 4)
+    ["PermitRootLogin"]="no"
+    ["MaxAuthTries"]="3"
+    ["MaxSessions"]="10"
+    ["StrictModes"]="yes"
+    ["PubkeyAuthentication"]="yes"
+)
+
+# ============================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================================
+
+# Функция сравнения значений
+compare_value() {
+    local current_value="$1"
+    local expected_value="$2"
+    local comparison_type="$3"
+
+    if [[ -z "$current_value" ]] || [[ "$current_value" == "не задан" ]] || [[ "$current_value" == "не установлен" ]] || [[ "$current_value" == "файл отсутствует" ]]; then
+        echo "НЕ СООТВЕТСТВУЕТ"
+        return
+    fi
+
+    local current_lower=$(echo "$current_value" | tr '[:upper:]' '[:lower:]')
+    local expected_lower=$(echo "$expected_value" | tr '[:upper:]' '[:lower:]')
+
+    case "$comparison_type" in
+        "eq")
+            if [[ "$current_lower" == "$expected_lower" ]]; then
+                echo "СООТВЕТСТВУЕТ"
+            else
+                echo "НЕ СООТВЕТСТВУЕТ"
+            fi
+            ;;
+        "ge")
+            if [[ "$current_value" =~ ^[0-9]+$ ]] && [[ "$expected_value" =~ ^[0-9]+$ ]]; then
+                if [[ "$current_value" -ge "$expected_value" ]]; then
+                    echo "СООТВЕТСТВУЕТ"
+                else
+                    echo "НЕ СООТВЕТСТВУЕТ"
+                fi
+            else
+                echo "НЕИЗВЕСТНЫЙ ТИП"
+            fi
+            ;;
+        "le")
+            if [[ "$current_value" =~ ^[0-9]+$ ]] && [[ "$expected_value" =~ ^[0-9]+$ ]]; then
+                if [[ "$current_value" -le "$expected_value" ]]; then
+                    echo "СООТВЕТСТВУЕТ"
+                else
+                    echo "НЕ СООТВЕТСТВУЕТ"
+                fi
+            else
+                echo "НЕИЗВЕСТНЫЙ ТИП"
+            fi
+            ;;
+        *)
+            echo "НЕИЗВЕСТНЫЙ ТИП"
+            ;;
+    esac
 }
 
-# Функция для вывода строки таблицы на экран (с цветами)
-print_row_to_screen() {
-    local name="$1"
-    local file="$2"
-    local param="$3"
-    local value="$4"
-
-    echo -e "${HEADER_COLOR}${name}${NC}${file}${param}${value}"
-}
-
-# Функции для получения значений
+# Функция для получения значения PAM
 get_pam_value() {
     local param=$1
     local value=$(grep -E "pam_(cracklib|pwquality)\.so" /etc/pam.d/common-password 2>/dev/null | grep -oP "$param=\K\d+" | head -1)
@@ -38,6 +157,7 @@ get_pam_value() {
     fi
 }
 
+# Функция для проверки флага PAM
 check_pam_flag() {
     local flag=$1
     local file=$2
@@ -48,6 +168,7 @@ check_pam_flag() {
     fi
 }
 
+# Функция для получения параметра аутентификации
 get_auth_param() {
     local param=$1
     local value=$(grep -E "pam_tally2\.so|pam_faillock\.so" /etc/pam.d/common-auth 2>/dev/null | grep -oP "$param=\K\d+" | head -1)
@@ -64,7 +185,17 @@ check_astra_tool() {
     if command -v "$tool" &>/dev/null; then
         local status=$($tool 2>/dev/null | grep -i "статус\|status\|включ\|выключ\|enabled\|disabled" | head -1)
         if [[ -n "$status" ]]; then
-            echo "$status"
+            if echo "$status" | grep -qi "включ\|enabled\|active\|активно"; then
+                if [[ "$tool" == "astra-mic-control" ]]; then
+                    echo "АКТИВНО"
+                else
+                    echo "ВКЛЮЧЕНО"
+                fi
+            elif echo "$status" | grep -qi "выключ\|disabled\|inactive"; then
+                echo "ВЫКЛЮЧЕНО"
+            else
+                echo "$status"
+            fi
         else
             echo "установлен"
         fi
@@ -89,19 +220,120 @@ check_kernel_param() {
     fi
 }
 
-# Очищаем файл перед записью
-> "$OUTPUT_FILE"
+# ============================================================================
+# ФУНКЦИИ ДЛЯ ВЫВОДА ОТЧЕТА С ВЫРАВНИВАНИЕМ ЧЕРЕЗ ПРОБЕЛЫ
+# ============================================================================
 
-# Функция для одновременного вывода
+# Функция для получения статуса с цветом
+get_status_colored() {
+    local status="$1"
+    case "$status" in
+        "СООТВЕТСТВУЕТ") echo "${GREEN}СООТВЕТСТВУЕТ${NC}" ;;
+        "НЕ СООТВЕТСТВУЕТ") echo "${RED}НЕ СООТВЕТСТВУЕТ${NC}" ;;
+        *) echo "${YELLOW}НЕ ПРОВЕРЕНО${NC}" ;;
+    esac
+}
+
+# Функция для вывода строки таблицы (раздел 1 - парольная политика)
 print_row() {
     local name="$1"
     local file="$2"
     local param="$3"
-    local value="$4"
+    local current_value="$4"
+    local expected_value="$5"
+    local comparison_type="$6"
+    local status=$(compare_value "$current_value" "$expected_value" "$comparison_type")
 
-    print_row_to_screen "$name" "$file" "$param" "$value"
-    print_row_to_file "$name" "$file" "$param" "$value"
+    # Запись в файл (без цветов)
+    echo "$name|$file|$param|$current_value|$expected_value|$status" >> "$OUTPUT_FILE"
+
+    # Вывод на экран (с цветами)
+    local status_colored=$(get_status_colored "$status")
+    printf "${HEADER_COLOR}%-70s${NC} %-30s %-30s %-20s %-20s %s\n" \
+        "$name" "$file" "$param" "$current_value" "$expected_value" "$status_colored"
 }
+
+# Функция для вывода строки инструментов Astra (раздел 2)
+print_tool_row() {
+    local name="$1"
+    local param="$2"
+    local current_value="$3"
+    local expected_value="${EXPECTED_VALUES[$param]}"
+    
+    if [[ -z "$expected_value" ]]; then
+        expected_value="не задан"
+        local status="НЕ ПРОВЕРЕНО"
+    else
+        local status=$(compare_value "$current_value" "$expected_value" "eq")
+    fi
+
+    # Запись в файл (без цветов)
+    echo "$name|$param|$current_value|$expected_value|$status" >> "$OUTPUT_FILE"
+
+    # Вывод на экран (с цветами)
+    local status_colored=$(get_status_colored "$status")
+    printf "${HEADER_COLOR}%-90s${NC} %-35s %-20s %-20s %s\n" \
+        "$name" "$param" "$current_value" "$expected_value" "$status_colored"
+}
+
+# Функция для вывода строки параметров ядра (раздел 3)
+print_kernel_row() {
+    local name="$1"
+    local param="$2"
+    local current_value="$3"
+    local expected_value="${EXPECTED_VALUES[$param]}"
+    
+    if [[ -z "$expected_value" ]]; then
+        expected_value="не задан"
+        local status="НЕ ПРОВЕРЕНО"
+    else
+        local status=$(compare_value "$current_value" "$expected_value" "eq")
+    fi
+
+    # Запись в файл (без цветов)
+    echo "$name|$param|$current_value|$expected_value|$status" >> "$OUTPUT_FILE"
+
+    # Вывод на экран (с цветами)
+    local status_colored=$(get_status_colored "$status")
+    printf "${HEADER_COLOR}%-80s${NC} %-60s %-20s %-20s %s\n" \
+        "$name" "$param" "$current_value" "$expected_value" "$status_colored"
+}
+
+# Функция для вывода строки SSH (раздел 4)
+print_ssh_row() {
+    local name="$1"
+    local param="$2"
+    local current_value="$3"
+    local expected_value="${EXPECTED_VALUES[$param]}"
+    
+    if [[ -z "$expected_value" ]]; then
+        expected_value="не задан"
+        local status="НЕ ПРОВЕРЕНО"
+    else
+        local status=$(compare_value "$current_value" "$expected_value" "eq")
+    fi
+
+    # Запись в файл (без цветов)
+    echo "$name|$param|$current_value|$expected_value|$status" >> "$OUTPUT_FILE"
+
+    # Вывод на экран (с цветами)
+    local status_colored=$(get_status_colored "$status")
+    printf "${HEADER_COLOR}%-45s${NC} %-25s %-20s %-20s %s\n" \
+        "$name" "$param" "$current_value" "$expected_value" "$status_colored"
+}
+
+# ============================================================================
+# ЗАГОЛОВОК ОТЧЕТА
+# ============================================================================
+
+clear
+> "$OUTPUT_FILE"
+
+echo "================================================================================" | tee -a "$OUTPUT_FILE"
+echo "  СКРИПТ АНАЛИЗА ЗАЩИЩЕННОСТИ ASTRA LINUX SE 1.7/1.8" | tee -a "$OUTPUT_FILE"
+echo "  Дата: $(date '+%Y-%m-%d %H:%M:%S')" | tee -a "$OUTPUT_FILE"
+echo "================================================================================" | tee -a "$OUTPUT_FILE"
+echo "" | tee -a "$OUTPUT_FILE"
 
 # ============================================================================
 # РАЗДЕЛ 1: ПАРОЛЬНАЯ ПОЛИТИКА
@@ -111,136 +343,104 @@ echo "==========================================================================
 echo "  РАЗДЕЛ 1: ПАРОЛЬНАЯ ПОЛИТИКА" | tee -a "$OUTPUT_FILE"
 echo "================================================================================" | tee -a "$OUTPUT_FILE"
 
-# Заголовок
-HEADER_ROW="Наименование настройки                                                Расположение файла             Наименование параметра           Значение"
-echo "$HEADER_ROW" >> "$OUTPUT_FILE"
-echo "--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------" >> "$OUTPUT_FILE"
-echo -e "${HEADER_COLOR}${HEADER_ROW}${NC}"
-echo -e "${HEADER_COLOR}--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------${NC}"
+HEADER_ROW1="Наименование настройки                                                Расположение файла             Наименование параметра           Текущее значение    Требуемое значение  Статус"
+echo "$HEADER_ROW1" >> "$OUTPUT_FILE"
+echo "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------" >> "$OUTPUT_FILE"
+echo -e "${HEADER_COLOR}${HEADER_ROW1}${NC}"
+echo -e "${HEADER_COLOR}------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------${NC}"
 
-# 1. Максимальное количество дней использования пароля
+# 1. PASS_MAX_DAYS
 value=$(grep "^PASS_MAX_DAYS" /etc/login.defs 2>/dev/null | awk '{print $2}')
 [[ -z "$value" ]] && value="не задан"
-print_row "Максимальное количество дней использования пароля                     " "/etc/login.defs                " "PASS_MAX_DAYS                    " "$value"
+print_row "Максимальное количество дней использования пароля                     " "/etc/login.defs                " "PASS_MAX_DAYS                    " "$value" "90" "le"
 
-# 2. Минимальное количество дней между сменами пароля
+# 2. PASS_MIN_DAYS
 value=$(grep "^PASS_MIN_DAYS" /etc/login.defs 2>/dev/null | awk '{print $2}')
 [[ -z "$value" ]] && value="не задан"
-print_row "Минимальное количество дней между сменами пароля                      " "/etc/login.defs                " "PASS_MIN_DAYS                    " "$value"
+print_row "Минимальное количество дней между сменами пароля                      " "/etc/login.defs                " "PASS_MIN_DAYS                    " "$value" "7" "ge"
 
-# 3. Количество дней предупреждения до истечения срока
+# 3. PASS_WARN_AGE
 value=$(grep "^PASS_WARN_AGE" /etc/login.defs 2>/dev/null | awk '{print $2}')
 [[ -z "$value" ]] && value="не задан"
-print_row "Количество дней предупреждения до истечения срока действия пароля     " "/etc/login.defs                " "PASS_WARN_AGE                    " "$value"
+print_row "Количество дней предупреждения до истечения срока действия пароля     " "/etc/login.defs                " "PASS_WARN_AGE                    " "$value" "14" "ge"
 
-# 4. Количество неудачных попыток входа до блокировки
+# 4. deny
 value=$(get_auth_param "deny")
-print_row "Количество неудачных попыток входа до блокировки аккаунта             " "/etc/pam.d/common-auth         " "deny                             " "$value"
+print_row "Количество неудачных попыток входа до блокировки аккаунта             " "/etc/pam.d/common-auth         " "deny                             " "$value" "8" "eq"
 
-# 5. Отдельная статистика для каждого пользователя
+# 5. per_user
 if grep -E "pam_tally2\.so|pam_faillock\.so" /etc/pam.d/common-auth 2>/dev/null | grep -q "per_user"; then
     value="включен"
 else
     value="не задан"
 fi
-print_row "Отдельная статистика неудачных попыток для каждого пользователя       " "/etc/pam.d/common-auth         " "per_user                         " "$value"
+print_row "Отдельная статистика неудачных попыток для каждого пользователя       " "/etc/pam.d/common-auth         " "per_user                         " "$value" "включен" "eq"
 
-# 6. Требования к цифрам
+# 6. dcredit
 value=$(get_pam_value "dcredit")
-print_row "Требования к цифрам                                                   " "/etc/pam.d/common-password     " "dcredit                          " "$value"
+print_row "Требования к цифрам                                                   " "/etc/pam.d/common-password     " "dcredit                          " "$value" "1" "eq"
 
-# 7. Минимальное количество символов, отличающихся от старого пароля
+# 7. difok
 value=$(get_pam_value "difok")
-print_row "Минимальное количество символов, отличающихся от старого пароля       " "/etc/pam.d/common-password     " "difok                            " "$value"
+print_row "Минимальное количество символов, отличающихся от старого пароля       " "/etc/pam.d/common-password     " "difok                            " "$value" "3" "eq"
 
-# 8. Требования к строчным буквам
+# 8. lcredit
 value=$(get_pam_value "lcredit")
-print_row "Требования к строчным буквам                                          " "/etc/pam.d/common-password     " "lcredit                          " "$value"
+print_row "Требования к строчным буквам                                          " "/etc/pam.d/common-password     " "lcredit                          " "$value" "1" "eq"
 
-# 9. Минимальная длина пароля
+# 9. minlen
 value=$(get_pam_value "minlen")
-print_row "Минимальная длина пароля в символах                                   " "/etc/pam.d/common-password     " "minlen                           " "$value"
+print_row "Минимальная длина пароля в символах                                   " "/etc/pam.d/common-password     " "minlen                           " "$value" "12" "ge"
 
-# 10. Требования к специальным символам
+# 10. ocredit
 value=$(get_pam_value "ocredit")
-print_row "Требования к специальным символам                                     " "/etc/pam.d/common-password     " "ocredit                          " "$value"
+print_row "Требования к специальным символам                                     " "/etc/pam.d/common-password     " "ocredit                          " "$value" "1" "eq"
 
-# 11. Требования к заглавным буквам
+# 11. ucredit
 value=$(get_pam_value "ucredit")
-print_row "Требования к заглавным буквам                                         " "/etc/pam.d/common-password     " "ucredit                          " "$value"
+print_row "Требования к заглавным буквам                                         " "/etc/pam.d/common-password     " "ucredit                          " "$value" "1" "eq"
 
-# 12. Время блокировки
-value=$(get_auth_param "lock_time")
-print_row "Время блокировки в секундах                                           " "/etc/pam.d/common-auth         " "lock_time                        " "$value"
-
-# 13. Не использовать счетчик для root
-if grep -E "pam_tally2\.so|pam_faillock\.so" /etc/pam.d/common-auth 2>/dev/null | grep -q "magic_root"; then
-    value="включен"
-else
-    value="не задан"
-fi
-print_row "Не использовать счетчик для пользователя с uid=0 (root)               " "/etc/pam.d/common-auth         " "magic_root                       " "$value"
-
-# 14. Время разблокировки
-value=$(get_auth_param "unlock_time")
-print_row "Время разблокировки в секундах                                        " "/etc/pam.d/common-auth         " "unlock_time                      " "$value"
-
-# 15. Дней неактивности до отключения аккаунта
-value=$(sudo awk -F: -v user=$(whoami) '$1==user {print $7}' /etc/shadow 2>/dev/null)
-if [[ -z "$value" || "$value" == "" || "$value" == "99999" ]]; then
-    value="не задан"
-fi
-print_row "Дней неактивности до автоматического отключения аккаунта              " "/etc/shadow                     " "inactive                         " "$value"
-
-# 16. Пароль не должен содержать имя пользователя
+# 12. reject_username
 if grep -E "pam_(cracklib|pwquality)\.so" /etc/pam.d/common-password 2>/dev/null | grep -q "reject_username"; then
     value="да"
 else
     value="не задан"
 fi
-print_row "Пароль не должен содержать имя пользователя                           " "/etc/pam.d/common-password     " "reject_username                  " "$value"
+print_row "Пароль не должен содержать имя пользователя                           " "/etc/pam.d/common-password     " "reject_username                  " "$value" "да" "eq"
 
-# 17. Пароль не должен содержать данные из GECOS
+# 13. gecoscheck
 if grep -E "pam_(cracklib|pwquality)\.so" /etc/pam.d/common-password 2>/dev/null | grep -q "gecoscheck"; then
     value="да"
 else
     value="не задан"
 fi
-print_row "Пароль не должен содержать данные из поля GECOS                       " "/etc/pam.d/common-password     " "gecoscheck                       " "$value"
+print_row "Пароль не должен содержать данные из поля GECOS                       " "/etc/pam.d/common-password     " "gecoscheck                       " "$value" "да" "eq"
 
-# 18. enforce_for_root (сложность)
+# 14. enforce_for_root (сложность)
 value=$(check_pam_flag "enforce_for_root" "/etc/pam.d/common-password")
-print_row "Требования к сложности пароля применяются и к root                    " "/etc/pam.d/common-password     " "enforce_for_root (сложность)     " "$value"
+print_row "Требования к сложности пароля применяются и к root                    " "/etc/pam.d/common-password     " "enforce_for_root (сложность)     " "$value" "да" "eq"
 
-# 19. enforce_for_root для истории
+# 15. enforce_for_root (история)
 if grep "pam_unix.so" /etc/pam.d/common-password 2>/dev/null | grep -q "enforce_for_root"; then
     value="да"
 else
     value="не задан"
 fi
-print_row "Требования к истории пароля применяются и к root                      " "/etc/pam.d/common-password     " "enforce_for_root (история)       " "$value"
+print_row "Требования к истории пароля применяются и к root                      " "/etc/pam.d/common-password     " "enforce_for_root (история)       " "$value" "да" "eq"
 
-# 20. remember
+# 16. remember
 value=$(grep "pam_unix.so" /etc/pam.d/common-password 2>/dev/null | grep -oP 'remember=\K\d+' | head -1)
-print_row "Количество паролей, которые нужно запомнить                           " "/etc/pam.d/common-password     " "remember                         " "${value:-не задан}"
+[[ -z "$value" ]] && value="не задан"
+print_row "Количество паролей, которые нужно запомнить                           " "/etc/pam.d/common-password     " "remember                         " "$value" "5" "ge"
 
-# 21. INACTIVE из /etc/default/useradd
+# 17. INACTIVE из /etc/default/useradd
 if [ -f /etc/default/useradd ]; then
     value=$(grep "^INACTIVE" /etc/default/useradd 2>/dev/null | cut -d= -f2)
     [[ -z "$value" ]] && value="не задан"
 else
     value="файл отсутствует"
 fi
-print_row "Количество дней неактивности до отключения учётной записи             " "/etc/default/useradd           " "INACTIVE                         " "$value"
-
-# 22. EXPIRE из /etc/default/useradd
-if [ -f /etc/default/useradd ]; then
-    value=$(grep "^EXPIRE" /etc/default/useradd 2>/dev/null | cut -d= -f2)
-    [[ -z "$value" ]] && value="не задан"
-else
-    value="файл отсутствует"
-fi
-print_row "Дата истечения срока действия учётной записи по умолчанию             " "/etc/default/useradd           " "EXPIRE                           " "$value"
+print_row "Количество дней неактивности до отключения учётной записи             " "/etc/default/useradd           " "INACTIVE                         " "$value" "90" "eq"
 
 # ============================================================================
 # РАЗДЕЛ 2: ИНСТРУМЕНТЫ КОМАНДНОЙ СТРОКИ ASTRA LINUX
@@ -250,28 +450,16 @@ echo "==========================================================================
 echo "  РАЗДЕЛ 2: ИНСТРУМЕНТЫ КОМАНДНОЙ СТРОКИ ASTRA LINUX" | tee -a "$OUTPUT_FILE"
 echo "================================================================================" | tee -a "$OUTPUT_FILE"
 
-HEADER_TOOL="Наименование настройки                                                                                                      Действия/параметр              Значение"
+HEADER_TOOL="Наименование настройки                                                                                                      Действия/параметр              Текущее значение    Требуемое значение  Статус"
 echo "$HEADER_TOOL" >> "$OUTPUT_FILE"
-echo "----------------------------------------------------------------------------------------------------------------------------------------------------------------" >> "$OUTPUT_FILE"
+echo "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------" >> "$OUTPUT_FILE"
 echo -e "${HEADER_COLOR}${HEADER_TOOL}${NC}"
-echo -e "${HEADER_COLOR}----------------------------------------------------------------------------------------------------------------------------------------------------------------${NC}"
-
-print_tool_row() {
-    local name="$1"
-    local param="$2"
-    local value="$3"
-    local line="${name}${param}${value}"
-    echo "$line" >> "$OUTPUT_FILE"
-    echo -e "${HEADER_COLOR}${name}${NC}${param}${value}"
-}
+echo -e "${HEADER_COLOR}------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------${NC}"
 
 print_tool_row "Запрос пароля при каждом выполнении команды sudo                                                                            " "astra-sudo-control             " "$(check_astra_tool "astra-sudo-control")"
 print_tool_row "Управление блокировкой выключения/перезагрузки ПК для пользователей                                                         " "astra-shutdown-lock           " "$(check_astra_tool "astra-shutdown-lock")"
 print_tool_row "Включение режима запрета монтирования носителей непривилегированным пользователям                                           " "astra-mount-lock              " "$(check_astra_tool "astra-mount-lock")"
-
-format_lock_status=$(check_astra_tool "fly-admin-format")
-print_tool_row "Включение режима запрета форматирования съемных машинных носителей информации непривилегированным пользователям             " "astra-format-lock             " "$format_lock_status"
-
+print_tool_row "Включение режима запрета форматирования съемных машинных носителей информации непривилегированным пользователям             " "astra-format-lock             " "$(check_astra_tool "astra-format-lock")"
 print_tool_row "Мандатный контроль целостности                                                                                             " "astra-mic-control             " "$(check_astra_tool "astra-mic-control")"
 print_tool_row "Расширенный режим мандатного контроля целостности                                                                          " "astra-strictmode-control      " "$(check_astra_tool "astra-strictmode-control")"
 print_tool_row "Межсетевой экран ufw                                                                                                       " "astra-ufw-control             " "$(check_astra_tool "astra-ufw-control")"
@@ -302,30 +490,14 @@ echo "==========================================================================
 echo "  РАЗДЕЛ 3: ПАРАМЕТРЫ БЕЗОПАСНОСТИ ЯДРА" | tee -a "$OUTPUT_FILE"
 echo "================================================================================" | tee -a "$OUTPUT_FILE"
 
-HEADER_KERNEL="Наименование настройки                                                                  Конфигурируемый параметр                                                                                    Статус"
+HEADER_KERNEL="Наименование настройки                                                                  Конфигурируемый параметр                                                                                    Текущее значение    Требуемое значение  Статус"
 echo "$HEADER_KERNEL" >> "$OUTPUT_FILE"
-echo "-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------" >> "$OUTPUT_FILE"
+echo "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------" >> "$OUTPUT_FILE"
 echo -e "${HEADER_COLOR}${HEADER_KERNEL}${NC}"
-echo -e "${HEADER_COLOR}-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------${NC}"
+echo -e "${HEADER_COLOR}------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------${NC}"
 
-print_kernel_row() {
-    local name="$1"
-    local param="$2"
-    local status="$3"
-    local line="${name}${param}${status}"
-    echo "$line" >> "$OUTPUT_FILE"
-    echo -e "${HEADER_COLOR}${name}${NC}${param}${status}"
-}
-
-# Параметры ядра
 print_kernel_row "Отключение переадресации IP пакетов (IP forwarding)                                                                     " "net.ipv4.ip_forward                                                                               " "$(check_kernel_param "net.ipv4.ip_forward")"
-
-accept_redirects=$(check_kernel_param "net.ipv4.conf.all.accept_redirects")
-secure_redirects=$(check_kernel_param "net.ipv4.conf.all.secure_redirects")
-send_redirects=$(check_kernel_param "net.ipv4.conf.all.send_redirects")
-icmp_status="accept_redirects: $accept_redirects; secure_redirects: $secure_redirects; send_redirects: $send_redirects"
-print_kernel_row "Параметры, отвечающие за выдачу ICMP Redirect (ICMP перенаправления) другим хостам                                      " "net.ipv4.conf.all.accept_redirects, net.ipv4.conf.all.secure_redirects, net.ipv4.conf.all.send_redirects    " "$icmp_status"
-
+print_kernel_row "Параметры, отвечающие за выдачу ICMP Redirect (ICMP перенаправления) другим хостам                                      " "net.ipv4.conf.all.accept_redirects, net.ipv4.conf.all.secure_redirects, net.ipv4.conf.all.send_redirects    " "$(check_kernel_param "net.ipv4.conf.all.accept_redirects") $(check_kernel_param "net.ipv4.conf.all.secure_redirects") $(check_kernel_param "net.ipv4.conf.all.send_redirects")"
 print_kernel_row "Ограничение небезопасных вариантов работы с жесткими ссылками (hardlinks)                                              " "fs.protected_hardlinks                                                                            " "$(check_kernel_param "fs.protected_hardlinks")"
 print_kernel_row "Ограничение небезопасных вариантов прохода по символическим ссылкам (symlinks)                                         " "fs.protected_symlinks                                                                             " "$(check_kernel_param "fs.protected_symlinks")"
 print_kernel_row "Запрет создания core dump для некоторых исполняемых файлов                                                              " "fs.suid_dumpable                                                                                  " "$(check_kernel_param "fs.suid_dumpable")"
@@ -345,60 +517,41 @@ echo "==========================================================================
 echo "  РАЗДЕЛ 4: КОНФИГУРАЦИЯ SSH СЕРВЕРА" | tee -a "$OUTPUT_FILE"
 echo "================================================================================" | tee -a "$OUTPUT_FILE"
 
-HEADER_SSH="Наименование настройки                                  Параметр                Значение"
+HEADER_SSH="Наименование настройки                                  Параметр                Текущее значение    Требуемое значение  Статус"
 echo "$HEADER_SSH" >> "$OUTPUT_FILE"
-echo "-----------------------------------------------------------------------------------------------------------------" >> "$OUTPUT_FILE"
+echo "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------" >> "$OUTPUT_FILE"
 echo -e "${HEADER_COLOR}${HEADER_SSH}${NC}"
-echo -e "${HEADER_COLOR}-----------------------------------------------------------------------------------------------------------------${NC}"
-
-print_ssh_row() {
-    local name="$1"
-    local param="$2"
-    local value="$3"
-    local line="${name}${param}${value}"
-    echo "$line" >> "$OUTPUT_FILE"
-    echo -e "${HEADER_COLOR}${name}${NC}${param}${value}"
-}
+echo -e "${HEADER_COLOR}------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------${NC}"
 
 if [ -f /etc/ssh/sshd_config ]; then
     port=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
     [[ -z "$port" ]] && port="22"
-
-    listen_addr=$(grep -E "^ListenAddress " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | tr '\n' ', ' | sed 's/, $//')
-    [[ -z "$listen_addr" ]] && listen_addr="0.0.0.0"
-
-    login_grace=$(grep -E "^LoginGraceTime " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
-    [[ -z "$login_grace" ]] && login_grace="120"
+    print_ssh_row "Порт, на котором слушает SSH сервер                     " "Port                   " "$port"
 
     permit_root=$(grep -E "^PermitRootLogin " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
     [[ -z "$permit_root" ]] && permit_root="prohibit-password"
-    [[ "$permit_root" == "yes" ]] && permit_root="YES"
-    [[ "$permit_root" == "no" ]] && permit_root="NO"
+    print_ssh_row "Разрешение входа пользователю root по SSH               " "PermitRootLogin        " "$permit_root"
 
     strict_modes=$(grep -E "^StrictModes " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
     [[ -z "$strict_modes" ]] && strict_modes="yes"
+    print_ssh_row "Проверка прав и владельцев файлов/каталогов             " "StrictModes            " "$strict_modes"
 
     max_auth_tries=$(grep -E "^MaxAuthTries " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
     [[ -z "$max_auth_tries" ]] && max_auth_tries="6"
+    print_ssh_row "Максимальное число попыток аутентификации               " "MaxAuthTries           " "$max_auth_tries"
 
     max_sessions=$(grep -E "^MaxSessions " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
     [[ -z "$max_sessions" ]] && max_sessions="10"
+    print_ssh_row "Максимальное число сессий на соединение                 " "MaxSessions            " "$max_sessions"
 
     pubkey_auth=$(grep -E "^PubkeyAuthentication " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
     [[ -z "$pubkey_auth" ]] && pubkey_auth="yes"
-
-    print_ssh_row "Порт, на котором слушает SSH сервер                     " "Port                   " "$port"
-    print_ssh_row "Адрес(а), на которых слушает SSH сервер                 " "ListenAddress          " "$listen_addr"
-    print_ssh_row "Время ожидания входа до разрыва соединения              " "LoginGraceTime         " "$login_grace"
-    print_ssh_row "Разрешение входа пользователю root по SSH               " "PermitRootLogin        " "$permit_root"
-    print_ssh_row "Проверка прав и владельцев файлов/каталогов             " "StrictModes            " "$strict_modes"
-    print_ssh_row "Максимальное число попыток аутентификации               " "MaxAuthTries           " "$max_auth_tries"
-    print_ssh_row "Максимальное число сессий на соединение                 " "MaxSessions            " "$max_sessions"
     print_ssh_row "Аутентификация по открытому ключу (публичным ключам)    " "PubkeyAuthentication   " "$pubkey_auth"
 else
-    print_ssh_row "SSH сервер не установлен или конфиг не найден           " "-                      " "-"
+    echo "SSH сервер не установлен или конфиг не найден" | tee -a "$OUTPUT_FILE"
 fi
 
+# Проверка fail2ban
 if command -v fail2ban-client &>/dev/null; then
     fail2ban_status="установлен"
     if systemctl is-active --quiet fail2ban 2>/dev/null; then
@@ -408,8 +561,9 @@ else
     fail2ban_status="не установлен"
 fi
 print_ssh_row "Наличие ПО fail2ban                                    " "fail2ban               " "$fail2ban_status"
+
 # ============================================================================
-# РАЗДЕЛ 5: ИНФОРМАЦИЯ ОБ УЧЁТНЫХ ЗАПИСЯХ ПОЛЬЗОВАТЕЛЕЙ
+# РАЗДЕЛ 5: ИНФОРМАЦИЯ ОБ УЧЁТНЫХ ЗАПИСЯХ
 # ============================================================================
 echo "" | tee -a "$OUTPUT_FILE"
 echo "================================================================================" | tee -a "$OUTPUT_FILE"
@@ -427,16 +581,13 @@ echo -e "${HEADER_COLOR}--------------------------------------------------------
 get_account_info() {
     local username="$1"
 
-    # Проверяем существует ли пользователь
     if ! id "$username" &>/dev/null; then
         return
     fi
 
-    # Получаем информацию из /etc/shadow
     local shadow_line=$(sudo grep "^$username:" /etc/shadow 2>/dev/null)
 
     if [[ -z "$shadow_line" ]]; then
-        # Пользователь есть в /etc/passwd, но нет в /etc/shadow (пароль не установлен)
         printf "%-27s %-22s %-55s %-45s %-32s %-51s %-76s %-43s\n" \
             "$username" "нет пароля" "-" "-" "-" "-" "-" "-" >> "$OUTPUT_FILE"
         printf "${HEADER_COLOR}%-27s${NC} %-22s %-55s %-45s %-32s %-51s %-76s %-43s\n" \
@@ -444,11 +595,8 @@ get_account_info() {
         return
     fi
 
-    # Разбираем поля /etc/shadow
-    # Формат: username:password:last_change:min_days:max_days:warn_days:inactive:expire:reserved
     IFS=':' read -r user pass last_change min_days max_days warn_days inactive expire rest <<< "$shadow_line"
 
-    # Определяем парольную информацию
     if [[ "$pass" == "*" || "$pass" == "!" || "$pass" == "!!" ]]; then
         password_info="Заблокирован"
     elif [[ "$pass" =~ ^\$6\$ ]]; then
@@ -459,7 +607,6 @@ get_account_info() {
         password_info="установлен"
     fi
 
-    # Преобразуем last_change в дни после последнего изменения
     if [[ "$last_change" =~ ^[0-9]+$ ]] && [[ "$last_change" -gt 0 ]]; then
         local current_epoch=$(date +%s)
         local current_days=$((current_epoch / 86400))
@@ -469,28 +616,11 @@ get_account_info() {
         last_change="-"
     fi
 
-    # Обработка остальных полей
-    if [[ "$min_days" =~ ^[0-9]+$ ]]; then
-        [[ "$min_days" -eq 0 ]] && min_days="0"
-    else
-        min_days="-"
-    fi
+    [[ ! "$min_days" =~ ^[0-9]+$ ]] && min_days="-"
+    [[ "$max_days" =~ ^[0-9]+$ ]] && [[ "$max_days" -eq 99999 ]] && max_days="-"
+    [[ ! "$warn_days" =~ ^[0-9]+$ ]] && warn_days="-"
+    [[ ! "$inactive" =~ ^[0-9]+$ ]] && inactive="-"
 
-    if [[ "$max_days" =~ ^[0-9]+$ ]]; then
-        [[ "$max_days" -eq 99999 ]] && max_days="-"
-    else
-        max_days="-"
-    fi
-
-    if [[ ! "$warn_days" =~ ^[0-9]+$ ]]; then
-        warn_days="-"
-    fi
-
-    if [[ ! "$inactive" =~ ^[0-9]+$ ]]; then
-        inactive="-"
-    fi
-
-    # Преобразуем expire в дату
     if [[ "$expire" =~ ^[0-9]+$ ]] && [[ "$expire" -gt 0 ]]; then
         expire=$(date -d "1970-01-01 + $expire days" +"%Y-%m-%d" 2>/dev/null)
         [[ -z "$expire" ]] && expire="-"
@@ -498,46 +628,39 @@ get_account_info() {
         expire="-"
     fi
 
-    # Формируем строку с фиксированной шириной
-    # Ширина столбцов: 27, 22, 55, 45, 32, 51, 76, 43
     printf "%-27s %-22s %-55s %-45s %-32s %-51s %-76s %-43s\n" \
-        "$username" \
-        "$password_info" \
-        "$last_change" \
-        "$min_days" \
-        "$max_days" \
-        "$warn_days" \
-        "$inactive" \
-        "$expire" >> "$OUTPUT_FILE"
+        "$username" "$password_info" "$last_change" "$min_days" "$max_days" "$warn_days" "$inactive" "$expire" >> "$OUTPUT_FILE"
 
     printf "${HEADER_COLOR}%-27s${NC} %-22s %-55s %-45s %-32s %-51s %-76s %-43s\n" \
-        "$username" \
-        "$password_info" \
-        "$last_change" \
-        "$min_days" \
-        "$max_days" \
-        "$warn_days" \
-        "$inactive" \
-        "$expire"
+        "$username" "$password_info" "$last_change" "$min_days" "$max_days" "$warn_days" "$inactive" "$expire"
 }
 
 # Получаем информацию об учётных записях
-# Сначала root
 get_account_info "root"
 
-# Затем всех пользователей с UID >= 1000 и UID < 65534 (исключая системных)
 while IFS=: read -r username _ uid _ _ _ _; do
     if [[ $uid -ge 1000 ]] && [[ $uid -lt 65534 ]] 2>/dev/null; then
         get_account_info "$username"
     fi
 done < /etc/passwd
 
-echo "" | tee -a "$OUTPUT_FILE"
 # ============================================================================
 # ЗАВЕРШЕНИЕ
 # ============================================================================
 echo "" | tee -a "$OUTPUT_FILE"
 echo "================================================================================" | tee -a "$OUTPUT_FILE"
+
+# Подсчет статистики
+total_checks=$(grep -c "|" "$OUTPUT_FILE" 2>/dev/null || echo 0)
+failed_checks=$(grep -c "НЕ СООТВЕТСТВУЕТ" "$OUTPUT_FILE" 2>/dev/null || echo 0)
+passed_checks=$(grep -c "СООТВЕТСТВУЕТ" "$OUTPUT_FILE" 2>/dev/null || echo 0)
+
+echo "📊 СТАТИСТИКА ПРОВЕРКИ:" | tee -a "$OUTPUT_FILE"
+echo "   ✅ Соответствует: $passed_checks" | tee -a "$OUTPUT_FILE"
+echo "   ❌ Не соответствует: $failed_checks" | tee -a "$OUTPUT_FILE"
+echo "   📝 Всего проверок: $total_checks" | tee -a "$OUTPUT_FILE"
+echo "" | tee -a "$OUTPUT_FILE"
+
 echo "✅ Полный отчет сохранен в файл: $OUTPUT_FILE" | tee -a "$OUTPUT_FILE"
 echo "📁 Полный путь: $(pwd)/$OUTPUT_FILE" | tee -a "$OUTPUT_FILE"
 echo "================================================================================" | tee -a "$OUTPUT_FILE"
